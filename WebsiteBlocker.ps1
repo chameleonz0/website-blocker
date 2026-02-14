@@ -175,8 +175,9 @@ function Refresh-AllBlocks {
 }
 
 function Get-BlockedList {
-    $FromFirewall = Get-NetFirewallRule -DisplayName "BLOCK_RULE_*" -ErrorAction SilentlyContinue | ForEach-Object { $_.DisplayName.Replace("BLOCK_RULE_", "") } | Select-Object -Unique
-    
+    # CHANGE: Added @() around the command to force it to be an array
+    $FromFirewall = @(Get-NetFirewallRule -DisplayName "BLOCK_RULE_*" -ErrorAction SilentlyContinue | ForEach-Object { $_.DisplayName.Replace("BLOCK_RULE_", "") } | Select-Object -Unique)
+   
     $FromHosts = @()
     $Lines = Get-Content $HostsPath -ErrorAction SilentlyContinue
     foreach ($Line in $Lines) {
@@ -184,6 +185,8 @@ function Get-BlockedList {
             $FromHosts += $Matches[1]
         }
     }
+    
+    # Now that both are definitely arrays, they will combine correctly
     return ($FromFirewall + $FromHosts) | Select-Object -Unique | Sort-Object
 }
 
