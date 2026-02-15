@@ -190,8 +190,9 @@ function Add-Block {
         attrib +r $HostsPath
         
     } catch {
+        # Using ${Target} to properly delimit the variable
         Write-Host "[-] Hosts file modification failed: $($_.Exception.Message)" -ForegroundColor Red
-        Log-Action "Hosts error for $Target: $($_.Exception.Message)"
+        Log-Action "Hosts error for ${Target}: $($_.Exception.Message)"
     }
     
     Refresh-Network
