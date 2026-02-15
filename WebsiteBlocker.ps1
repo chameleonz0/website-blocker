@@ -126,20 +126,47 @@ function Remove-Block {
     param([string]$Target)
     $EscapedTarget = [regex]::Escape($Target)
     
+    # Remove firewall rule
     Remove-NetFirewallRule -DisplayName "BLOCK_RULE_$Target" -ErrorAction SilentlyContinue
     
+    # Backup before modifying
     Backup-Hosts
+    
+    # Remove read-only attribute
     attrib -r $HostsPath
-    $Lines = Get-Content $HostsPath
-    if ($null -ne $Lines) {
-        $Cleaned = $Lines | Where-Object {
-            $_ -notmatch "# (START|END) BLOCK: $EscapedTarget" -and
-            $_ -notmatch "# BLOCKING: $EscapedTarget" -and
-            $_ -notmatch "\s$EscapedTarget\s.*# BY_NUKER" -and
-            $_ -notmatch "^#\s*-{3,}$"
+    
+    # Use file locking
+    $fs = $null
+    try {
+        # Read with proper encoding
+        $Lines = Get-Content $HostsPath -Encoding UTF8 -ErrorAction Stop
+        
+        # More precise filtering
+        $Cleaned = @()
+        $skipBlock = $false
+        
+        foreach ($Line in $Lines) {
+            if ($Line -match "# START BLOCK: $EscapedTarget") {
+                $skipBlock = $true
+                continue
+            }
+            if ($Line -match "# END BLOCK: $EscapedTarget") {
+                $skipBlock = $false
+                continue
+            }
+            if ($skipBlock) { continue }
+            
+            # Only remove lines that are part of our block
+            if ($Line -match "\s$EscapedTarget\s.*# BY_NUKER") { continue }
+            if ($Line -match "# BLOCKING: $EscapedTarget") { continue }
+            
+            $Cleaned += $Line
         }
-        $Cleaned | Out-File -FilePath $TempPath -Encoding ascii -Force
-        Move-Item -Path $TempPath -Destination $HostsPath -Force
+        
+        # Write back with proper encoding
+        $Cleaned | Out-File -FilePath $HostsPath -Encoding UTF8 -Force
+    } finally {
+        if ($fs) { $fs.Dispose() }
     }
     
     Refresh-Network
