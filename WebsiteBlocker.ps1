@@ -176,25 +176,45 @@ function Remove-Block {
 
 function Open-Access {
     param([string]$Target)
+    
+    # Temporarily unblock
     Remove-Block $Target
     
-    try { Start-Process "https://$Target" } catch { Start-Process "http://$Target" }
+    # Open browser
+    try { 
+        Start-Process "https://$Target" 
+    } catch { 
+        try { Start-Process "http://$Target" } catch { }
+    }
     
-    Write-Host "[!] Temporary Access Open for $Target ($TimerSeconds seconds). Press 'B' to re-block early." -ForegroundColor Yellow
+    Write-Host "[!] Temporary Access Open for $Target ($TimerSeconds seconds)" -ForegroundColor Yellow
+    Write-Host "    Press 'B' and ENTER to re-block early" -ForegroundColor Gray
     
-    for ($i = $TimerSeconds; $i -gt 0; $i--) {
+    $startTime = Get-Date
+    $endTime = $startTime.AddSeconds($TimerSeconds)
+    
+    while ((Get-Date) -lt $endTime) {
+        $remaining = ($endTime - (Get-Date)).TotalSeconds
+        $percent = (($TimerSeconds - $remaining) / $TimerSeconds) * 100
+        
+        # Show progress
+        Write-Progress -Activity "Temporary Access: $Target" -Status "$([math]::Round($remaining)) seconds remaining" -PercentComplete $percent
+        
+        # Check for input
         if ($Host.UI.RawUI.KeyAvailable) {
-            $key = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+            $key = $Host.UI.RawUI.ReadKey("IncludeKeyUp,NoEcho")
             if ($key.Character -eq 'b' -or $key.Character -eq 'B') {
+                Write-Host "`n[!] Early re-block requested" -ForegroundColor Yellow
                 break
             }
         }
-        $percent = (($TimerSeconds - $i) / $TimerSeconds) * 100
-        Write-Progress -Activity "Temporary Access: $Target" -Status "$i seconds remaining" -PercentComplete $percent
-        Start-Sleep -Seconds 1
+        
+        Start-Sleep -Milliseconds 100
     }
     
     Write-Progress -Activity "Temporary Access: $Target" -Completed
+    
+    # Re-block
     Add-Block $Target
     Write-Host "[+] $Target re-blocked." -ForegroundColor Green
 }
