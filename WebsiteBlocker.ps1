@@ -1,4 +1,4 @@
-﻿# --- WEBSITE BLOCKER v1.0 ---
+# --- WEBSITE BLOCKER v2.0 ---
 # MIT License
 # Copyright (c) 2026 [chameleonz0]
 #
@@ -15,44 +15,55 @@
 # Note: Run as Administrator. This script modifies hosts file and firewall rules to block websites.
 # Backup of hosts file is created automatically.
 
-$Host.UI.RawUI.WindowTitle = "WEBSITE BLOCKER v1.0"
+$Host.UI.RawUI.WindowTitle = "WEBSITE BLOCKER v2.0"
 
+# Check admin privileges
 if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
     exit
 }
 
-
+# File paths
 $HostsPath = "$env:windir\System32\drivers\etc\hosts"
 $HostsBackupPath = "$env:windir\System32\drivers\etc\hosts.bak"
 $TempPath = "$env:temp\hosts_tmp"
-$LogPath = "$env:USERPROFILE\Documents\blocker.log"  # Persistent log path
-#verify log path is writable
 $LogPath = "$env:USERPROFILE\Documents\blocker.log"
+
+# Verify log path is writable
 try {
-    # Test write access
     "`n" | Out-File -FilePath $LogPath -Append -ErrorAction Stop
 } catch {
-    # Fallback to temp directory
     $LogPath = "$env:TEMP\blocker.log"
     Write-Host "[!] Using fallback log location: $LogPath" -ForegroundColor Yellow
 }
 
 # Configurable variables
-$TimerSeconds = 60  # Default 1 minutes for temporary access (edit to change)
+$TimerSeconds = 60  # Default 1 minute for temporary access
 $SubdomainsBase = @(
-    "", "www.", "api.", "gateway.", "gql.", "v.", "i.", "static.", "media.", "assets.", "m.", "cdn.", "app.",
-    "auth.", "login.", "web.", "secure.", "blog.", "shop.", "store.", "mail.", "docs.", "images.", "video."
+    "", "www.", "m.", "mobile.", 
+    "api.", "api-v1.", "api-v2.", "gateway.", "gql.", "graphql.",
+    "cdn.", "cdn1.", "cdn2.", "cdn3.", "static.", "assets.", "media.", "images.", "img.", "video.",
+    "app.", "web.", "client.", "portal.",
+    "auth.", "login.", "oauth.", "accounts.", "sso.",
+    "ws.", "websocket.", "wss.",
+    "edge.", "edge-chat.",
+    "secure.", "safe.",
+    "mail.", "email.",
+    "docs.", "help.", "support.",
+    "blog.", "news.",
+    "shop.", "store.", "checkout.", "cart.",
+    "upload.", "download.",
+    "dev.", "staging.", "beta.", "alpha."
 )
 
 # Performance optimizations
 $PSDefaultParameterValues['*:ErrorAction'] = 'SilentlyContinue'
-$ProgressPreference = 'SilentlyContinue'  # Speeds up operations
+$ProgressPreference = 'SilentlyContinue'
 
-# Use .NET for faster operations where possible
-Add-Type -AssemblyName System.Net.Http
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
 
-# Function to log actions
 function Log-Action {
     param([string]$Message)
     try {
@@ -63,10 +74,9 @@ function Log-Action {
     }
 }
 
-# Backup hosts file
 function Backup-Hosts {
     if (!(Test-Path $HostsBackupPath)) {
-        Copy-Item $HostsPath $HostsBackupPath
+        Copy-Item $HostsPath $HostsBackupPath -Force
         Log-Action "Hosts file backed up to $HostsBackupPath"
     }
 }
@@ -74,406 +84,659 @@ function Backup-Hosts {
 function Refresh-Network {
     try {
         ipconfig /flushdns | Out-Null
+        Start-Sleep -Milliseconds 100
     } catch {
-        Write-Host "[-] Failed to flush DNS: $_" -ForegroundColor Yellow
-    }
-    
-    try {
-        netsh interface ip delete arpcache 2>$null | Out-Null
-    } catch {
-        # ARP cache deletion may fail, but it's not critical
-    }
-    
-    # Also clear DNS cache via .NET
-    try {
-        $__ = [System.Net.Dns]::GetHostEntry("localhost")
-    } catch {
-        # Ignore errors
+        Write-Host "[-] Failed to flush DNS" -ForegroundColor Yellow
     }
 }
 
-function Resolve-IPs {
-    param([string[]]$Subdomains)
-    $DnsServers = @("8.8.8.8", "1.1.1.1", "9.9.9.9")  # Added Quad9
-    $IPv4List = @()
-    $IPv6List = @()
+function Test-ValidDomain {
+    param([string]$Domain)
     
-    foreach ($Server in $DnsServers) {
-        foreach ($S in $Subdomains) {
-            try {
-                # Add timeout to prevent hanging
-                $Records = Resolve-DnsName $S -Server $Server -Type A -ErrorAction SilentlyContinue -DnsOnly
-                $IPv4List += $Records | Where-Object { $_.IPAddress } | Select-Object -ExpandProperty IPAddress -Unique
-                
-                $Records6 = Resolve-DnsName $S -Server $Server -Type AAAA -ErrorAction SilentlyContinue -DnsOnly
-                $IPv6List += $Records6 | Where-Object { $_.IPAddress } | Select-Object -ExpandProperty IPAddress -Unique
-            } catch {
-                # Silently continue - DNS failed
+    if ([string]::IsNullOrWhiteSpace($Domain)) { return $false }
+    if ($Domain.Length -lt 4 -or $Domain.Length -gt 253) { return $false }
+    if ($Domain -match "[^a-zA-Z0-9\.\-]") { return $false }
+    if (-not $Domain.Contains(".")) { return $false }
+    if ($Domain.StartsWith(".") -or $Domain.EndsWith(".")) { return $false }
+    if ($Domain.Contains("..")) { return $false }
+    
+    return $true
+}
+
+function Generate-Subdomains {
+    param([string]$Domain)
+    
+    $Subdomains = @()
+    
+    # Add base domain and www
+    $Subdomains += $Domain
+    $Subdomains += "www.$Domain"
+    
+    # Add all subdomain prefixes
+    foreach ($Prefix in $SubdomainsBase) {
+        if ($Prefix -eq "" -or $Prefix -eq "www.") { continue }  # Already added
+        $Subdomains += "$Prefix$Domain"
+    }
+    
+    # Add wildcard patterns for hosts file (some browsers respect these)
+    $Subdomains += "*.$Domain"
+    
+    return $Subdomains | Select-Object -Unique
+}
+
+function Resolve-IPs-Fast {
+    param([string[]]$Subdomains)
+    
+    $AllIPs = @()
+    $MaxConcurrent = 5
+    $TimeoutMs = 2000  # 2 second timeout per query
+    
+    # Only query the main domain and www subdomain (much faster)
+    $PrioritySubdomains = $Subdomains | Where-Object { 
+        $_ -notmatch "^\*\." -and ($_ -eq $Subdomains[0] -or $_ -like "www.*")
+    } | Select-Object -First 3
+    
+    foreach ($Subdomain in $PrioritySubdomains) {
+        try {
+            # Use Resolve-DnsName with timeout
+            $Job = Start-Job -ScriptBlock {
+                param($domain)
+                try {
+                    $results = @()
+                    $a = Resolve-DnsName $domain -Type A -ErrorAction Stop -DnsOnly
+                    $results += $a | Where-Object { $_.IPAddress } | Select-Object -ExpandProperty IPAddress
+                    $aaaa = Resolve-DnsName $domain -Type AAAA -ErrorAction Stop -DnsOnly
+                    $results += $aaaa | Where-Object { $_.IPAddress } | Select-Object -ExpandProperty IPAddress
+                    return $results
+                } catch {
+                    return @()
+                }
+            } -ArgumentList $Subdomain
+            
+            # Wait with timeout
+            $Completed = Wait-Job $Job -Timeout ($TimeoutMs / 1000)
+            
+            if ($Completed) {
+                $Result = Receive-Job $Job
+                if ($Result) {
+                    $AllIPs += $Result
+                }
             }
+            
+            Remove-Job $Job -Force
+            
+        } catch {
+            # Skip failed lookups
+            continue
         }
     }
     
-    # Remove duplicates and empty entries
-    return @{
-        IPv4 = $IPv4List | Where-Object { $_ } | Select-Object -Unique
-        IPv6 = $IPv6List | Where-Object { $_ } | Select-Object -Unique
-    }
+    return $AllIPs | Where-Object { $_ } | Select-Object -Unique
 }
+
+# ============================================================================
+# CORE BLOCKING FUNCTIONS
+# ============================================================================
 
 function Add-Block {
     param([string]$UrlInput)
     
-    # Input validation
-    $Target = $UrlInput.Trim().Replace("https://", "").Replace("http://", "").Replace("www.", "").Split('/')[0].Split(':')[0]
+    # Input validation and cleanup
+    $Target = $UrlInput.Trim() -replace '^https?://', '' -replace '^www\.', '' -replace '[/:].*$', ''
     
     if (-not (Test-ValidDomain $Target)) {
         Write-Host "[-] Invalid domain: $Target" -ForegroundColor Red
         return
     }
     
+    Write-Host "[*] Blocking $Target..." -ForegroundColor Yellow
+    
     # Generate subdomains
     $Subdomains = Generate-Subdomains -Domain $Target
+    Write-Host "[*] Generated $($Subdomains.Count) subdomain variants" -ForegroundColor Gray
     
-    # Firewall Layer - with error handling
-    $RuleName = "BLOCK_RULE_$Target"
+    # ========== FIREWALL LAYER ==========
+    $RuleName = "WebBlock_$($Target.Replace('.', '_'))"
+    
     try {
+        # Remove existing rule if present
         Remove-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue
         
-        $IPs = Resolve-IPs -Subdomains $Subdomains
-        if ($IPs.IPv4.Count -eq 0 -and $IPs.IPv6.Count -eq 0) {
-            Write-Host "[-] DNS resolution failed for $Target. Using hosts file only." -ForegroundColor Yellow
+        # Resolve IPs (fast method)
+        Write-Host "[*] Resolving IP addresses..." -ForegroundColor Gray
+        $IPs = Resolve-IPs-Fast -Subdomains $Subdomains
+        
+        if ($IPs.Count -gt 0) {
+            # Windows Firewall has a limit of ~1000 IPs per rule, so we limit it
+            $IPsToBlock = $IPs | Select-Object -First 100 -Unique
+            
+            New-NetFirewallRule -DisplayName $RuleName `
+                -Direction Outbound `
+                -Action Block `
+                -RemoteAddress $IPsToBlock `
+                -Protocol Any `
+                -ErrorAction Stop | Out-Null
+            
+            Write-Host "[+] Firewall: Blocked $($IPsToBlock.Count) IP addresses" -ForegroundColor Green
         } else {
-            $RemoteAddresses = @($IPs.IPv4 + $IPs.IPv6) | Select-Object -Unique
-            if ($RemoteAddresses.Count -gt 0) {
-                New-NetFirewallRule -DisplayName $RuleName -Direction Outbound -Action Block -RemoteAddress $RemoteAddresses -Protocol Any -ErrorAction Stop | Out-Null
-                Write-Host "[+] Added $($RemoteAddresses.Count) IPs to firewall block" -ForegroundColor Green
-            }
+            Write-Host "[!] Firewall: No IPs resolved (using hosts file only)" -ForegroundColor Yellow
         }
+        
     } catch {
-        Write-Host "[-] Firewall rule creation failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "[!] Firewall rule failed: $($_.Exception.Message)" -ForegroundColor Yellow
         Log-Action "Firewall error for ${Target}: $($_.Exception.Message)"
     }
     
-    # Hosts Layer
+    # ========== HOSTS FILE LAYER ==========
     try {
         Backup-Hosts
         
-        # Ensure hosts file is writable
-        attrib -r $HostsPath
+        # Remove read-only attribute
+        Set-ItemProperty -Path $HostsPath -Name IsReadOnly -Value $false
         
         # Check if already blocked
-        $existing = Select-String -Path $HostsPath -Pattern "# START BLOCK: $Target" -Quiet
-        if (-not $existing) {
+        $HostsContent = Get-Content $HostsPath -Raw -ErrorAction Stop
+        
+        if ($HostsContent -match "# START_BLOCK: $([regex]::Escape($Target))") {
+            Write-Host "[!] Hosts: Already blocked" -ForegroundColor Yellow
+        } else {
             $Date = Get-Date -Format "yyyy-MM-dd HH:mm"
             
-            $FullBlock = @()
-            $FullBlock += ""
-            $FullBlock += "# ------------------------------------------------"
-            $FullBlock += "# BLOCKING: $Target (Added: $Date)"
-            $FullBlock += "# START BLOCK: $Target"
+            # Build the block
+            $BlockLines = @()
+            $BlockLines += ""
+            $BlockLines += "# ================================================"
+            $BlockLines += "# BLOCKED: $Target (Added: $Date)"
+            $BlockLines += "# START_BLOCK: $Target"
             
-            foreach ($S in $Subdomains) {
-                $FullBlock += "127.0.0.1 $S # BY_NUKER"
-                $FullBlock += "::1 $S # BY_NUKER"
+            foreach ($Sub in $Subdomains) {
+                if ($Sub -notmatch "^\*\.") {  # Skip wildcard entries for hosts
+                    $BlockLines += "127.0.0.1 $Sub"
+                    $BlockLines += "::1 $Sub"
+                }
             }
             
-            $FullBlock += "# END BLOCK: $Target"
+            $BlockLines += "# END_BLOCK: $Target"
+            $BlockLines += "# ================================================"
             
-            # Append with proper encoding
-            $FullBlock | Add-Content -Path $HostsPath -Encoding UTF8
-            Write-Host "[+] Added $($Subdomains.Count) subdomains to hosts file" -ForegroundColor Green
-        } else {
-            Write-Host "[i] $Target already in hosts file" -ForegroundColor Yellow
+            # Append to hosts file
+            $BlockLines | Out-File -FilePath $HostsPath -Append -Encoding UTF8 -Force
+            
+            Write-Host "[+] Hosts: Added $($Subdomains.Count) entries" -ForegroundColor Green
         }
         
         # Restore read-only
-        attrib +r $HostsPath
+        Set-ItemProperty -Path $HostsPath -Name IsReadOnly -Value $true
         
     } catch {
-        # Using ${Target} to properly delimit the variable
-        Write-Host "[-] Hosts file modification failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "[!] Hosts file failed: $($_.Exception.Message)" -ForegroundColor Yellow
         Log-Action "Hosts error for ${Target}: $($_.Exception.Message)"
     }
     
+    # Refresh network
     Refresh-Network
-    Write-Host "[+] $Target Blocked Successfully." -ForegroundColor Green
+    
+    Write-Host ""
+    Write-Host "[✓] $Target is now BLOCKED" -ForegroundColor Green -BackgroundColor DarkGreen
+    Write-Host ""
     Log-Action "Blocked: $Target"
+    
+    Start-Sleep -Seconds 1
 }
 
 function Remove-Block {
     param([string]$Target)
-    $EscapedTarget = [regex]::Escape($Target)
     
-    # Remove firewall rule
-    Remove-NetFirewallRule -DisplayName "BLOCK_RULE_$Target" -ErrorAction SilentlyContinue
+    Write-Host "[*] Unblocking $Target..." -ForegroundColor Yellow
     
-    # Backup before modifying
-    Backup-Hosts
-    
-    # Remove read-only attribute
-    attrib -r $HostsPath
-    
-    # Use file locking
-    $fs = $null
+    # ========== REMOVE FIREWALL RULE ==========
+    $RuleName = "WebBlock_$($Target.Replace('.', '_'))"
     try {
-        # Read with proper encoding
-        $Lines = Get-Content $HostsPath -Encoding UTF8 -ErrorAction Stop
+        Remove-NetFirewallRule -DisplayName $RuleName -ErrorAction Stop
+        Write-Host "[+] Firewall rule removed" -ForegroundColor Green
+    } catch {
+        # Rule might not exist
+    }
+    
+    # ========== REMOVE FROM HOSTS FILE ==========
+    try {
+        Backup-Hosts
         
-        # More precise filtering
-        $Cleaned = @()
-        $skipBlock = $false
+        # Remove read-only
+        Set-ItemProperty -Path $HostsPath -Name IsReadOnly -Value $false
         
-        foreach ($Line in $Lines) {
-            if ($Line -match "# START BLOCK: $EscapedTarget") {
-                $skipBlock = $true
+        # Read all lines
+        $AllLines = Get-Content $HostsPath -ErrorAction Stop
+        
+        # Filter out the block
+        $NewLines = @()
+        $InBlock = $false
+        $EscapedTarget = [regex]::Escape($Target)
+        
+        foreach ($Line in $AllLines) {
+            if ($Line -match "^# START_BLOCK: $EscapedTarget\s*$") {
+                $InBlock = $true
                 continue
             }
-            if ($Line -match "# END BLOCK: $EscapedTarget") {
-                $skipBlock = $false
+            
+            if ($Line -match "^# END_BLOCK: $EscapedTarget\s*$") {
+                $InBlock = $false
                 continue
             }
-            if ($skipBlock) { continue }
             
-            # Only remove lines that are part of our block
-            if ($Line -match "\s$EscapedTarget\s.*# BY_NUKER") { continue }
-            if ($Line -match "# BLOCKING: $EscapedTarget") { continue }
+            # Skip lines in block
+            if ($InBlock) {
+                continue
+            }
             
-            $Cleaned += $Line
+            # Skip header/separator lines for this domain
+            if ($Line -match "^# BLOCKED: $EscapedTarget") {
+                continue
+            }
+            
+            if ($Line -match "^# ={20,}\s*$") {
+                # Check if previous line was domain-specific
+                if ($NewLines.Count -gt 0 -and $NewLines[-1] -match "BLOCKED: $EscapedTarget") {
+                    continue
+                }
+            }
+            
+            $NewLines += $Line
         }
         
-        # Write back with proper encoding
-        $Cleaned | Out-File -FilePath $HostsPath -Encoding UTF8 -Force
-    } finally {
-        if ($fs) { $fs.Dispose() }
+        # Write back
+        $NewLines | Out-File -FilePath $HostsPath -Encoding UTF8 -Force
+        
+        Write-Host "[+] Hosts entries removed" -ForegroundColor Green
+        
+        # Restore read-only
+        Set-ItemProperty -Path $HostsPath -Name IsReadOnly -Value $true
+        
+    } catch {
+        Write-Host "[!] Hosts file error: $($_.Exception.Message)" -ForegroundColor Yellow
+        Log-Action "Unblock error for ${Target}: $($_.Exception.Message)"
     }
     
     Refresh-Network
-    Write-Host "[+] $Target Unblocked." -ForegroundColor Green
+    
+    Write-Host ""
+    Write-Host "[✓] $Target is now UNBLOCKED" -ForegroundColor Green -BackgroundColor DarkGreen
+    Write-Host ""
     Log-Action "Unblocked: $Target"
+    
+    Start-Sleep -Seconds 1
 }
 
 function Open-Access {
     param([string]$Target)
     
+    Write-Host ""
+    Write-Host "════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host "  TEMPORARY ACCESS MODE" -ForegroundColor White
+    Write-Host "════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host ""
+    
     # Temporarily unblock
     Remove-Block $Target
     
     # Open browser
+    Write-Host "[*] Opening browser..." -ForegroundColor Gray
     try { 
         Start-Process "https://$Target" 
     } catch { 
-        try { Start-Process "http://$Target" } catch { }
+        try { 
+            Start-Process "http://$Target" 
+        } catch {
+            Write-Host "[!] Could not open browser automatically" -ForegroundColor Yellow
+        }
     }
     
-    Write-Host "[!] Temporary Access Open for $Target ($TimerSeconds seconds)" -ForegroundColor Yellow
-    Write-Host "    Press 'B' and ENTER to re-block early" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "[!] $Target is temporarily accessible" -ForegroundColor Yellow
+    Write-Host "    Timer: $TimerSeconds seconds" -ForegroundColor Gray
+    Write-Host "    Press 'B' + ENTER to re-block immediately" -ForegroundColor Gray
+    Write-Host ""
     
-    $startTime = Get-Date
-    $endTime = $startTime.AddSeconds($TimerSeconds)
+    $StartTime = Get-Date
+    $EndTime = $StartTime.AddSeconds($TimerSeconds)
     
-    while ((Get-Date) -lt $endTime) {
-        $remaining = ($endTime - (Get-Date)).TotalSeconds
-        $percent = (($TimerSeconds - $remaining) / $TimerSeconds) * 100
+    # Timer loop
+    while ((Get-Date) -lt $EndTime) {
+        $Remaining = [math]::Ceiling(($EndTime - (Get-Date)).TotalSeconds)
         
-        # Show progress
-        Write-Progress -Activity "Temporary Access: $Target" -Status "$([math]::Round($remaining)) seconds remaining" -PercentComplete $percent
+        if ($Remaining -le 0) { break }
         
-        # Check for input
-        if ($Host.UI.RawUI.KeyAvailable) {
-            $key = $Host.UI.RawUI.ReadKey("IncludeKeyUp,NoEcho")
-            if ($key.Character -eq 'b' -or $key.Character -eq 'B') {
-                Write-Host "`n[!] Early re-block requested" -ForegroundColor Yellow
+        # Show countdown
+        Write-Host "`r[TIMER] $Remaining seconds remaining...     " -NoNewline -ForegroundColor Yellow
+        
+        # Check for 'B' key (non-blocking)
+        if ([Console]::KeyAvailable) {
+            $Key = [Console]::ReadKey($true)
+            if ($Key.Key -eq 'B') {
+                Write-Host "`n"
+                Write-Host "[!] Early re-block triggered by user" -ForegroundColor Yellow
                 break
             }
         }
         
-        Start-Sleep -Milliseconds 100
+        Start-Sleep -Milliseconds 500
     }
     
-    Write-Progress -Activity "Temporary Access: $Target" -Completed
+    Write-Host "`n"
     
     # Re-block
     Add-Block $Target
-    Write-Host "[+] $Target re-blocked." -ForegroundColor Green
-}
-
-function Test-ValidDomain {
-    param([string]$Domain)
-    
-    # Basic domain validation
-    if ($Domain.Length -lt 4 -or $Domain.Length -gt 255) {
-        return $false
-    }
-    
-    # Check for invalid characters
-    if ($Domain -match "[^a-zA-Z0-9\.\-_]") {
-        return $false
-    }
-    
-    # Must contain at least one dot
-    if (-not $Domain.Contains(".")) {
-        return $false
-    }
-    
-    return $true
-}
-
-function Refresh-AllBlocks {
-    $Blocked = Get-BlockedList
-    foreach ($Target in $Blocked) {
-        Add-Block $Target
-    }
-    Write-Host "[+] All blocks refreshed with latest IPs." -ForegroundColor Green
-    Log-Action "Refreshed all blocks"
 }
 
 function Get-BlockedList {
-    # Ensure arrays are initialized properly
-    $FromFirewall = @()
-    $FromHosts = @()
-    
-    # Get firewall rules - with null checking
-    $rules = Get-NetFirewallRule -DisplayName "BLOCK_RULE_*" -ErrorAction SilentlyContinue
-    if ($rules) {
-        $FromFirewall = @($rules | ForEach-Object { 
-            $_.DisplayName -replace "BLOCK_RULE_", "" 
-        } | Where-Object { $_ } | Select-Object -Unique)
-    }
+    $BlockedSites = @()
     
     # Parse hosts file
     if (Test-Path $HostsPath) {
-        $Lines = Get-Content $HostsPath -ErrorAction SilentlyContinue
-        if ($Lines) {
+        try {
+            $Lines = Get-Content $HostsPath -ErrorAction Stop
             foreach ($Line in $Lines) {
-                if ($Line -match "# BLOCKING: (.*) \(Added:") {
-                    $FromHosts += $Matches[1]
+                if ($Line -match "^# BLOCKED: (.+?) \(Added:") {
+                    $BlockedSites += $Matches[1]
                 }
+            }
+        } catch {
+            Write-Host "[!] Could not read hosts file" -ForegroundColor Yellow
+        }
+    }
+    
+    return $BlockedSites | Select-Object -Unique | Sort-Object
+}
+
+function Refresh-AllBlocks {
+    Write-Host "[*] Refreshing all blocks..." -ForegroundColor Yellow
+    Write-Host ""
+    
+    $Blocked = Get-BlockedList
+    
+    if ($Blocked.Count -eq 0) {
+        Write-Host "[!] No sites to refresh" -ForegroundColor Yellow
+        return
+    }
+    
+    $Count = 0
+    foreach ($Target in $Blocked) {
+        $Count++
+        Write-Host "[$Count/$($Blocked.Count)] Refreshing: $Target" -ForegroundColor Gray
+        
+        # Remove old firewall rule
+        $RuleName = "WebBlock_$($Target.Replace('.', '_'))"
+        Remove-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue
+        
+        # Re-add with fresh IPs
+        $Subdomains = Generate-Subdomains -Domain $Target
+        $IPs = Resolve-IPs-Fast -Subdomains $Subdomains
+        
+        if ($IPs.Count -gt 0) {
+            $IPsToBlock = $IPs | Select-Object -First 100 -Unique
+            try {
+                New-NetFirewallRule -DisplayName $RuleName `
+                    -Direction Outbound `
+                    -Action Block `
+                    -RemoteAddress $IPsToBlock `
+                    -Protocol Any `
+                    -ErrorAction Stop | Out-Null
+                Write-Host "    → Updated with $($IPsToBlock.Count) IPs" -ForegroundColor Green
+            } catch {
+                Write-Host "    → Firewall update failed" -ForegroundColor Yellow
             }
         }
     }
     
-    # Combine and clean
-    $combined = @($FromFirewall) + @($FromHosts)
-    return $combined | Where-Object { $_ } | Select-Object -Unique | Sort-Object
+    Write-Host ""
+    Write-Host "[✓] All blocks refreshed" -ForegroundColor Green
+    Log-Action "Refreshed all blocks"
+    Start-Sleep -Seconds 2
+}
+
+function Remove-AllBlocks {
+    Write-Host "[!] This will remove ALL blocks!" -ForegroundColor Red
+    $Confirm = Read-Host "Type 'DELETE' to confirm"
+    
+    if ($Confirm -ne 'DELETE') {
+        Write-Host "[*] Cancelled" -ForegroundColor Gray
+        return
+    }
+    
+    Write-Host ""
+    Write-Host "[*] Removing all blocks..." -ForegroundColor Yellow
+    
+    # Remove all firewall rules
+    try {
+        $Rules = Get-NetFirewallRule -DisplayName "WebBlock_*" -ErrorAction SilentlyContinue
+        if ($Rules) {
+            $Rules | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+            Write-Host "[+] Removed $($Rules.Count) firewall rules" -ForegroundColor Green
+        }
+    } catch {
+        Write-Host "[!] Firewall cleanup error" -ForegroundColor Yellow
+    }
+    
+    # Clean hosts file
+    try {
+        Backup-Hosts
+        Set-ItemProperty -Path $HostsPath -Name IsReadOnly -Value $false
+        
+        $AllLines = Get-Content $HostsPath -ErrorAction Stop
+        $CleanLines = @()
+        $InBlock = $false
+        
+        foreach ($Line in $AllLines) {
+            if ($Line -match "^# START_BLOCK:") {
+                $InBlock = $true
+                continue
+            }
+            if ($Line -match "^# END_BLOCK:") {
+                $InBlock = $false
+                continue
+            }
+            if ($InBlock) { continue }
+            if ($Line -match "^# BLOCKED:") { continue }
+            if ($Line -match "^# ={20,}") { continue }
+            
+            $CleanLines += $Line
+        }
+        
+        $CleanLines | Out-File -FilePath $HostsPath -Encoding UTF8 -Force
+        Set-ItemProperty -Path $HostsPath -Name IsReadOnly -Value $true
+        
+        Write-Host "[+] Hosts file cleaned" -ForegroundColor Green
+        
+    } catch {
+        Write-Host "[!] Hosts file cleanup error: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+    
+    Refresh-Network
+    
+    Write-Host ""
+    Write-Host "[✓] All blocks removed" -ForegroundColor Green
+    Log-Action "Removed all blocks"
+    Start-Sleep -Seconds 2
 }
 
 function Show-Help {
     Clear-Host
-    Write-Host "╔════════════════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "║               WEBSITE BLOCKER v1.0             ║" -ForegroundColor White
-    Write-Host "║                    HELP MENU                   ║" -ForegroundColor White
-    Write-Host "╚════════════════════════════════════════════════╝" -ForegroundColor Cyan
+    Write-Host "╔══════════════════════════════════════════════════════╗" -ForegroundColor Cyan
+    Write-Host "║            WEBSITE BLOCKER v2.0 - HELP              ║" -ForegroundColor White
+    Write-Host "╚══════════════════════════════════════════════════════╝" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "This script blocks websites using both the hosts file and Windows Firewall for robust blocking."
+    Write-Host "WHAT'S FIXED IN v2.0:" -ForegroundColor Yellow
+    Write-Host " • Much faster DNS resolution (2 second timeout)" -ForegroundColor Gray
+    Write-Host " • Missing Generate-Subdomains function added" -ForegroundColor Gray
+    Write-Host " • Better subdomain coverage (CDNs, APIs, etc.)" -ForegroundColor Gray
+    Write-Host " • Fixed file encoding issues" -ForegroundColor Gray
+    Write-Host " • More reliable hosts file parsing" -ForegroundColor Gray
+    Write-Host " • Better error handling" -ForegroundColor Gray
+    Write-Host " • Fixed firewall rule naming conflicts" -ForegroundColor Gray
     Write-Host ""
-    Write-Host "Features:"
-    Write-Host " • Block websites (comma-separated supported)"
-    Write-Host " • Temporary access ($TimerSeconds seconds - edit `$TimerSeconds to change)"
-    Write-Host " • Permanent unblock"
-    Write-Host " • Remove all blocks"
-    Write-Host " • Refresh IPs for all blocked sites"
-    Write-Host " • Expanded subdomain coverage (edit `$SubdomainsBase array to customize)"
-    Write-Host " • Action logging at $LogPath"
-    Write-Host " • Automatic hosts backup at $HostsBackupPath"
+    Write-Host "HOW IT WORKS:" -ForegroundColor Yellow
+    Write-Host " This script uses TWO blocking layers:" -ForegroundColor White
+    Write-Host " 1. Windows Firewall - Blocks IP addresses" -ForegroundColor Gray
+    Write-Host " 2. Hosts File - Redirects domains to localhost" -ForegroundColor Gray
     Write-Host ""
-    Write-Host "Usage: Run as Administrator. Use the menu options."
+    Write-Host "FEATURES:" -ForegroundColor Yellow
+    Write-Host " • Block multiple sites at once (comma-separated)" -ForegroundColor Gray
+    Write-Host " • Temporary access with countdown timer" -ForegroundColor Gray
+    Write-Host " • Press 'B' during timer to re-block early" -ForegroundColor Gray
+    Write-Host " • Refresh blocks to update IPs" -ForegroundColor Gray
+    Write-Host " • Comprehensive subdomain blocking" -ForegroundColor Gray
+    Write-Host " • Automatic hosts file backup" -ForegroundColor Gray
+    Write-Host " • Action logging" -ForegroundColor Gray
     Write-Host ""
-    Write-Host "Press any key to return to menu..."
+    Write-Host "CONFIGURATION:" -ForegroundColor Yellow
+    Write-Host " • Timer duration: Edit `$TimerSeconds variable" -ForegroundColor Gray
+    Write-Host " • Subdomains: Edit `$SubdomainsBase array" -ForegroundColor Gray
+    Write-Host " • Log location: $LogPath" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "TIPS:" -ForegroundColor Yellow
+    Write-Host " • Run as Administrator (required)" -ForegroundColor Gray
+    Write-Host " • Some sites may need 'Refresh All Blocks' periodically" -ForegroundColor Gray
+    Write-Host " • If blocking fails, check the log file" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "Press any key to return to menu..." -ForegroundColor Cyan
     $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
 }
+
+# ============================================================================
+# MAIN MENU LOOP
+# ============================================================================
 
 do {
     try {
         Clear-Host
-        Write-Host "╔════════════════════════════════════════════════╗" -ForegroundColor Cyan
-        Write-Host "║               WEBSITE BLOCKER v1.0             ║" -ForegroundColor White
-        Write-Host "║               via Hosts & Firewall             ║" -ForegroundColor White
-        Write-Host "╚════════════════════════════════════════════════╝" -ForegroundColor Cyan
+        Write-Host "╔══════════════════════════════════════════════════════╗" -ForegroundColor Cyan
+        Write-Host "║            WEBSITE BLOCKER v2.0 (Fixed)             ║" -ForegroundColor White
+        Write-Host "║          Dual-Layer Blocking (Hosts + Firewall)     ║" -ForegroundColor White
+        Write-Host "╚══════════════════════════════════════════════════════╝" -ForegroundColor Cyan
         Write-Host ""
 
-        $List = Get-BlockedList
+        # Get and display blocked sites
+        $BlockedList = Get-BlockedList
         
-        if ($List.Count -gt 0) {
-            Write-Host "Currently Blocked Sites ($($List.Count)):" -ForegroundColor Magenta
-            $i=1
-            foreach($s in $List){
-                Write-Host " $i. $s" -ForegroundColor Gray
-                $i++
+        if ($BlockedList.Count -gt 0) {
+            Write-Host "Currently Blocked ($($BlockedList.Count) sites):" -ForegroundColor Magenta
+            Write-Host "─────────────────────────────────────────────────────" -ForegroundColor DarkGray
+            
+            $DisplayCount = [Math]::Min(15, $BlockedList.Count)
+            for ($i = 0; $i -lt $DisplayCount; $i++) {
+                Write-Host " $($i+1). $($BlockedList[$i])" -ForegroundColor Gray
             }
+            
+            if ($BlockedList.Count -gt 15) {
+                Write-Host " ... and $($BlockedList.Count - 15) more" -ForegroundColor DarkGray
+            }
+            
             Write-Host ""
         } else {
             Write-Host "No sites currently blocked." -ForegroundColor Yellow
             Write-Host ""
         }
         
-        Write-Host "Menu:" -ForegroundColor Cyan
-        Write-Host "1. Block New Website(s)"
-        Write-Host "2. Temporary Access"
-        Write-Host "3. Permanent Unblock Specific"
-        Write-Host "4. Remove All Blocks"
-        Write-Host "5. Refresh All Blocks (update IPs)"
-        Write-Host "6. Help"
-        Write-Host "7. Exit"
+        Write-Host "═══════════════════ MENU ═══════════════════" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host " 1. Block New Website(s)" -ForegroundColor White
+        Write-Host " 2. Temporary Access (timer)" -ForegroundColor White
+        Write-Host " 3. Permanently Unblock Site" -ForegroundColor White
+        Write-Host " 4. Remove ALL Blocks" -ForegroundColor White
+        Write-Host " 5. Refresh All Blocks (update IPs)" -ForegroundColor White
+        Write-Host " 6. Help & Info" -ForegroundColor White
+        Write-Host " 7. Exit" -ForegroundColor White
+        Write-Host ""
+        Write-Host "════════════════════════════════════════════" -ForegroundColor Cyan
         Write-Host ""
         
-        $choice = Read-Host "Enter your choice"
+        $Choice = Read-Host "Enter your choice (1-7)"
+        Write-Host ""
 
-        switch ($choice) {
+        switch ($Choice) {
             "1" {
-                $in = Read-Host "Enter website(s) (comma-separated)"
-                if ($in) {
-                    $Sites = $in.Split(',') | ForEach-Object { $_.Trim() }
-                    foreach ($Site in $Sites) { Add-Block $Site }
-                }
-            }
-            "2" {
-                if ($List.Count -gt 0) {
-                    $n = Read-Host "Enter site number"
-                    if ($n -match '^\d+$' -and [int]$n -le $List.Count) {
-                        Open-Access $List[[int]$n - 1]
-                    } else { Write-Host "[-] Invalid number." -ForegroundColor Red }
-                } else {
-                    Write-Host "[-] No sites to access." -ForegroundColor Red
-                }
-            }
-            "3" {
-                if ($List.Count -gt 0) {
-                    $n = Read-Host "Enter site number"
-                    if ($n -match '^\d+$' -and [int]$n -le $List.Count) {
-                        $Confirm = Read-Host "Confirm unblock $($List[[int]$n - 1])? (Y/N)"
-                        if ($Confirm -eq 'Y' -or $Confirm -eq 'y') { Remove-Block $List[[int]$n - 1] }
-                    } else { Write-Host "[-] Invalid number." -ForegroundColor Red }
-                }
-            }
-            "4" {
-                $Confirm = Read-Host "Confirm remove ALL blocks? (Y/N)"
-                if ($Confirm -eq 'Y' -or $Confirm -eq 'y') {
-                    Get-NetFirewallRule -DisplayName "BLOCK_RULE_*" | Remove-NetFirewallRule -ErrorAction SilentlyContinue
-                    Backup-Hosts
-                    attrib -r $HostsPath
-                    $Lines = Get-Content $HostsPath -ErrorAction SilentlyContinue
-                    if ($null -ne $Lines) {
-                        $Keepers = $Lines | Where-Object {
-                            $_ -notmatch "# BY_NUKER" -and
-                            $_ -notmatch "# (START|END) BLOCK:" -and
-                            $_ -notmatch "# BLOCKING:" -and
-                            $_ -notmatch "^#\s*-{3,}$"
-                        }
-                        $Keepers | Out-File -FilePath $TempPath -Encoding ascii -Force
-                        Move-Item -Path $TempPath -Destination $HostsPath -Force
+                $Input = Read-Host "Enter website(s) to block (comma-separated for multiple)"
+                if ($Input) {
+                    $Sites = $Input.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+                    foreach ($Site in $Sites) {
+                        Add-Block $Site
                     }
-                    Refresh-Network
-                    Write-Host "[+] All blocks removed." -ForegroundColor Green
-                    Log-Action "Removed all blocks"
+                } else {
+                    Write-Host "[-] No input provided" -ForegroundColor Red
+                    Start-Sleep -Seconds 1
                 }
             }
-            "5" { Refresh-AllBlocks }
-            "6" { Show-Help }
-            "7" { exit }
-            default { Write-Host "[-] Invalid option." -ForegroundColor Red }
+            
+            "2" {
+                if ($BlockedList.Count -eq 0) {
+                    Write-Host "[-] No sites are currently blocked" -ForegroundColor Red
+                    Start-Sleep -Seconds 2
+                } else {
+                    $Number = Read-Host "Enter site number (1-$($BlockedList.Count))"
+                    if ($Number -match '^\d+$' -and [int]$Number -ge 1 -and [int]$Number -le $BlockedList.Count) {
+                        $SelectedSite = $BlockedList[[int]$Number - 1]
+                        Open-Access $SelectedSite
+                    } else {
+                        Write-Host "[-] Invalid number" -ForegroundColor Red
+                        Start-Sleep -Seconds 1
+                    }
+                }
+            }
+            
+            "3" {
+                if ($BlockedList.Count -eq 0) {
+                    Write-Host "[-] No sites are currently blocked" -ForegroundColor Red
+                    Start-Sleep -Seconds 2
+                } else {
+                    $Number = Read-Host "Enter site number to unblock (1-$($BlockedList.Count))"
+                    if ($Number -match '^\d+$' -and [int]$Number -ge 1 -and [int]$Number -le $BlockedList.Count) {
+                        $SelectedSite = $BlockedList[[int]$Number - 1]
+                        $Confirm = Read-Host "Permanently unblock '$SelectedSite'? (Y/N)"
+                        if ($Confirm -eq 'Y' -or $Confirm -eq 'y') {
+                            Remove-Block $SelectedSite
+                        } else {
+                            Write-Host "[*] Cancelled" -ForegroundColor Gray
+                            Start-Sleep -Seconds 1
+                        }
+                    } else {
+                        Write-Host "[-] Invalid number" -ForegroundColor Red
+                        Start-Sleep -Seconds 1
+                    }
+                }
+            }
+            
+            "4" {
+                Remove-AllBlocks
+            }
+            
+            "5" {
+                Refresh-AllBlocks
+            }
+            
+            "6" {
+                Show-Help
+            }
+            
+            "7" {
+                Write-Host "[*] Exiting..." -ForegroundColor Gray
+                exit
+            }
+            
+            default {
+                Write-Host "[-] Invalid option. Please enter 1-7" -ForegroundColor Red
+                Start-Sleep -Seconds 1
+            }
         }
+        
     } catch {
-        Write-Host "[-] Error: $($_.Exception.Message)" -ForegroundColor Red
-        Log-Action "Error: $($_.Exception.Message) - StackTrace: $($_.Exception.StackTrace)"
+        Write-Host ""
+        Write-Host "═══════════════════════════════════════════" -ForegroundColor Red
+        Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "═══════════════════════════════════════════" -ForegroundColor Red
+        Write-Host ""
+        Log-Action "CRITICAL ERROR: $($_.Exception.Message) | StackTrace: $($_.ScriptStackTrace)"
+        Write-Host "Press any key to continue..." -ForegroundColor Yellow
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
     }
+    
 } while ($true)
