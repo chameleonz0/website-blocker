@@ -151,7 +151,7 @@ function Add-Block {
         }
     } catch {
         Write-Host "[-] Firewall rule creation failed: $($_.Exception.Message)" -ForegroundColor Red
-        Log-Action "Firewall error for $Target: $($_.Exception.Message)"
+        Log-Action "Firewall error for ${Target}: $($_.Exception.Message)"
     }
     
     # Hosts Layer
