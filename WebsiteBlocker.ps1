@@ -562,7 +562,7 @@ function Remove-AllBlocks {
 function Show-Help {
     Clear-Host
     Write-Host "╔══════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "║            WEBSITE BLOCKER v2.0 - HELP              ║" -ForegroundColor White
+    Write-Host "║            WEBSITE BLOCKER v2.0 - HELP               ║" -ForegroundColor White
     Write-Host "╚══════════════════════════════════════════════════════╝" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "WHAT'S FIXED IN v2.0:" -ForegroundColor Yellow
@@ -610,8 +610,8 @@ do {
     try {
         Clear-Host
         Write-Host "╔══════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-        Write-Host "║            WEBSITE BLOCKER v2.0 (Fixed)             ║" -ForegroundColor White
-        Write-Host "║          Dual-Layer Blocking (Hosts + Firewall)     ║" -ForegroundColor White
+        Write-Host "║            WEBSITE BLOCKER v2.0 (Fixed)              ║" -ForegroundColor White
+        Write-Host "║          Dual-Layer Blocking (Hosts + Firewall)      ║" -ForegroundColor White
         Write-Host "╚══════════════════════════════════════════════════════╝" -ForegroundColor Cyan
         Write-Host ""
 
