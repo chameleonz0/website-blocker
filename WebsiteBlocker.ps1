@@ -56,21 +56,29 @@ function Refresh-Network {
 
 function Resolve-IPs {
     param([string[]]$Subdomains)
-    $DnsServers = @("8.8.8.8", "1.1.1.1")
+    $DnsServers = @("8.8.8.8", "1.1.1.1", "9.9.9.9")  # Added Quad9
     $IPv4List = @()
     $IPv6List = @()
+    
     foreach ($Server in $DnsServers) {
         foreach ($S in $Subdomains) {
             try {
-                $Records = Resolve-DnsName $S -Server $Server -ErrorAction SilentlyContinue
-                $IPv4List += $Records | Where-Object { $_.QueryType -eq 1 } | Select-Object -ExpandProperty IPAddress
-                $IPv6List += $Records | Where-Object { $_.QueryType -eq 28 } | Select-Object -ExpandProperty IPAddress
-            } catch {}
+                # Add timeout to prevent hanging
+                $Records = Resolve-DnsName $S -Server $Server -Type A -ErrorAction SilentlyContinue -DnsOnly
+                $IPv4List += $Records | Where-Object { $_.IPAddress } | Select-Object -ExpandProperty IPAddress -Unique
+                
+                $Records6 = Resolve-DnsName $S -Server $Server -Type AAAA -ErrorAction SilentlyContinue -DnsOnly
+                $IPv6List += $Records6 | Where-Object { $_.IPAddress } | Select-Object -ExpandProperty IPAddress -Unique
+            } catch {
+                # Silently continue - DNS failed
+            }
         }
     }
+    
+    # Remove duplicates and empty entries
     return @{
-        IPv4 = $IPv4List | Select-Object -Unique
-        IPv6 = $IPv6List | Select-Object -Unique
+        IPv4 = $IPv4List | Where-Object { $_ } | Select-Object -Unique
+        IPv6 = $IPv6List | Where-Object { $_ } | Select-Object -Unique
     }
 }
 
@@ -85,11 +93,10 @@ function Add-Block {
     $RuleName = "BLOCK_RULE_$Target"
     Remove-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue
     $IPs = Resolve-IPs -Subdomains $Subdomains
-    if ($IPs.IPv4.Count -eq 0 -and $IPs.IPv6.Count -eq 0) {
-        Write-Host "[-] DNS resolution failed for $Target. Using hosts file only." -ForegroundColor Yellow
+    if ($RemoteAddresses.Count -gt 0) {
+        New-NetFirewallRule -DisplayName $RuleName -Direction Outbound -Action Block -RemoteAddress $RemoteAddresses -Protocol Any -ErrorAction Stop | Out-Null
     } else {
-        $RemoteAddresses = @($IPs.IPv4 + $IPs.IPv6) | Select-Object -Unique
-        New-NetFirewallRule -DisplayName $RuleName -Direction Outbound -Action Block -RemoteAddress $RemoteAddresses -Protocol Any | Out-Null
+    Write-Host "[-] No IPs to block via firewall for $Target" -ForegroundColor Yellow
     }
 
     # Hosts Layer
