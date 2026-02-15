@@ -26,6 +26,16 @@ $HostsPath = "$env:windir\System32\drivers\etc\hosts"
 $HostsBackupPath = "$env:windir\System32\drivers\etc\hosts.bak"
 $TempPath = "$env:temp\hosts_tmp"
 $LogPath = "$env:USERPROFILE\Documents\blocker.log"  # Persistent log path
+#verify log path is writable
+$LogPath = "$env:USERPROFILE\Documents\blocker.log"
+try {
+    # Test write access
+    "`n" | Out-File -FilePath $LogPath -Append -ErrorAction Stop
+} catch {
+    # Fallback to temp directory
+    $LogPath = "$env:TEMP\blocker.log"
+    Write-Host "[!] Using fallback log location: $LogPath" -ForegroundColor Yellow
+}
 
 # Configurable variables
 $TimerSeconds = 60  # Default 1 minutes for temporary access (edit to change)
@@ -37,8 +47,12 @@ $SubdomainsBase = @(
 # Function to log actions
 function Log-Action {
     param([string]$Message)
-    $Date = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Add-Content -Path $LogPath -Value "[$Date] $Message"
+    try {
+        $Date = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        Add-Content -Path $LogPath -Value "[$Date] $Message" -ErrorAction Stop
+    } catch {
+        # Silently fail logging if can't write
+    }
 }
 
 # Backup hosts file
