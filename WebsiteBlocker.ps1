@@ -64,8 +64,24 @@ function Backup-Hosts {
 }
 
 function Refresh-Network {
-    ipconfig /flushdns | Out-Null
-    netsh interface ip delete arpcache | Out-Null
+    try {
+        ipconfig /flushdns | Out-Null
+    } catch {
+        Write-Host "[-] Failed to flush DNS: $_" -ForegroundColor Yellow
+    }
+    
+    try {
+        netsh interface ip delete arpcache 2>$null | Out-Null
+    } catch {
+        # ARP cache deletion may fail, but it's not critical
+    }
+    
+    # Also clear DNS cache via .NET
+    try {
+        $__ = [System.Net.Dns]::GetHostEntry("localhost")
+    } catch {
+        # Ignore errors
+    }
 }
 
 function Resolve-IPs {
@@ -98,41 +114,80 @@ function Resolve-IPs {
 
 function Add-Block {
     param([string]$UrlInput)
+    
+    # Input validation
     $Target = $UrlInput.Trim().Replace("https://", "").Replace("http://", "").Replace("www.", "").Split('/')[0].Split(':')[0]
-    if ($Target.Length -lt 4 -or !$Target.Contains(".")) { Write-Host "[-] Invalid domain: $Target" -ForegroundColor Red; return }
     
-    $Subdomains = $SubdomainsBase | ForEach-Object { "$_$(if($_){''})$Target" } | Where-Object { $_ }
-
-    # Firewall Layer
-    $RuleName = "BLOCK_RULE_$Target"
-    Remove-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue
-    $IPs = Resolve-IPs -Subdomains $Subdomains
-    if ($RemoteAddresses.Count -gt 0) {
-        New-NetFirewallRule -DisplayName $RuleName -Direction Outbound -Action Block -RemoteAddress $RemoteAddresses -Protocol Any -ErrorAction Stop | Out-Null
-    } else {
-    Write-Host "[-] No IPs to block via firewall for $Target" -ForegroundColor Yellow
+    if (-not (Test-ValidDomain $Target)) {
+        Write-Host "[-] Invalid domain: $Target" -ForegroundColor Red
+        return
     }
-
-    # Hosts Layer
-    Backup-Hosts
-    attrib -r $HostsPath
-    $Date = Get-Date -Format "yyyy-MM-dd HH:mm"
     
-    if (!(Select-String -Path $HostsPath -Pattern "# START BLOCK: $Target" -Quiet)) {
-        $FullBlock = "`n# ------------------------------------------------`n"
-        $FullBlock += "# BLOCKING: $Target (Added: $Date)`n"
-        $FullBlock += "# START BLOCK: $Target`n"
-        foreach ($S in $Subdomains) {
-            $FullBlock += "127.0.0.1 $S # BY_NUKER`n"
-            $FullBlock += "::1 $S # BY_NUKER`n"
-        }
-        $FullBlock += "# END BLOCK: $Target"
+    # Generate subdomains
+    $Subdomains = Generate-Subdomains -Domain $Target
+    
+    # Firewall Layer - with error handling
+    $RuleName = "BLOCK_RULE_$Target"
+    try {
+        Remove-NetFirewallRule -DisplayName $RuleName -ErrorAction SilentlyContinue
         
-        Add-Content -Path $HostsPath -Value $FullBlock
+        $IPs = Resolve-IPs -Subdomains $Subdomains
+        if ($IPs.IPv4.Count -eq 0 -and $IPs.IPv6.Count -eq 0) {
+            Write-Host "[-] DNS resolution failed for $Target. Using hosts file only." -ForegroundColor Yellow
+        } else {
+            $RemoteAddresses = @($IPs.IPv4 + $IPs.IPv6) | Select-Object -Unique
+            if ($RemoteAddresses.Count -gt 0) {
+                New-NetFirewallRule -DisplayName $RuleName -Direction Outbound -Action Block -RemoteAddress $RemoteAddresses -Protocol Any -ErrorAction Stop | Out-Null
+                Write-Host "[+] Added $($RemoteAddresses.Count) IPs to firewall block" -ForegroundColor Green
+            }
+        }
+    } catch {
+        Write-Host "[-] Firewall rule creation failed: $($_.Exception.Message)" -ForegroundColor Red
+        Log-Action "Firewall error for $Target: $($_.Exception.Message)"
+    }
+    
+    # Hosts Layer
+    try {
+        Backup-Hosts
+        
+        # Ensure hosts file is writable
+        attrib -r $HostsPath
+        
+        # Check if already blocked
+        $existing = Select-String -Path $HostsPath -Pattern "# START BLOCK: $Target" -Quiet
+        if (-not $existing) {
+            $Date = Get-Date -Format "yyyy-MM-dd HH:mm"
+            
+            $FullBlock = @()
+            $FullBlock += ""
+            $FullBlock += "# ------------------------------------------------"
+            $FullBlock += "# BLOCKING: $Target (Added: $Date)"
+            $FullBlock += "# START BLOCK: $Target"
+            
+            foreach ($S in $Subdomains) {
+                $FullBlock += "127.0.0.1 $S # BY_NUKER"
+                $FullBlock += "::1 $S # BY_NUKER"
+            }
+            
+            $FullBlock += "# END BLOCK: $Target"
+            
+            # Append with proper encoding
+            $FullBlock | Add-Content -Path $HostsPath -Encoding UTF8
+            Write-Host "[+] Added $($Subdomains.Count) subdomains to hosts file" -ForegroundColor Green
+        } else {
+            Write-Host "[i] $Target already in hosts file" -ForegroundColor Yellow
+        }
+        
+        # Restore read-only
+        attrib +r $HostsPath
+        
+    } catch {
+        Write-Host "[-] Hosts file modification failed: $($_.Exception.Message)" -ForegroundColor Red
+        Log-Action "Hosts error for $Target: $($_.Exception.Message)"
     }
     
     Refresh-Network
-    Write-Host "[+] $Target Blocked." -ForegroundColor Green
+    Write-Host "[+] $Target Blocked Successfully." -ForegroundColor Green
     Log-Action "Blocked: $Target"
 }
 
@@ -231,6 +286,27 @@ function Open-Access {
     # Re-block
     Add-Block $Target
     Write-Host "[+] $Target re-blocked." -ForegroundColor Green
+}
+
+function Test-ValidDomain {
+    param([string]$Domain)
+    
+    # Basic domain validation
+    if ($Domain.Length -lt 4 -or $Domain.Length -gt 255) {
+        return $false
+    }
+    
+    # Check for invalid characters
+    if ($Domain -match "[^a-zA-Z0-9\.\-_]") {
+        return $false
+    }
+    
+    # Must contain at least one dot
+    if (-not $Domain.Contains(".")) {
+        return $false
+    }
+    
+    return $true
 }
 
 function Refresh-AllBlocks {
