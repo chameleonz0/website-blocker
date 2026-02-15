@@ -36,7 +36,7 @@ Blocking youtube.com also cause Gemini, youtube music, youtubekids, google ai st
 
 1. Download the repository or the files.
 
-2. Double-click `run.bat` (recommended — handles execution policy and launches the script).
+2. Run `run.bat` as Admin(ctrl-shift + click) (recommended — handles execution policy and launches the script).
 
 &nbsp;  - Or right-click `WebsiteBlocker.ps1` → Run with PowerShell (it will prompt for admin if needed).
 
