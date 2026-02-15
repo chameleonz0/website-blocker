@@ -22,6 +22,7 @@ if (!([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]:
     exit
 }
 
+
 $HostsPath = "$env:windir\System32\drivers\etc\hosts"
 $HostsBackupPath = "$env:windir\System32\drivers\etc\hosts.bak"
 $TempPath = "$env:temp\hosts_tmp"
@@ -43,6 +44,13 @@ $SubdomainsBase = @(
     "", "www.", "api.", "gateway.", "gql.", "v.", "i.", "static.", "media.", "assets.", "m.", "cdn.", "app.",
     "auth.", "login.", "web.", "secure.", "blog.", "shop.", "store.", "mail.", "docs.", "images.", "video."
 )
+
+# Performance optimizations
+$PSDefaultParameterValues['*:ErrorAction'] = 'SilentlyContinue'
+$ProgressPreference = 'SilentlyContinue'  # Speeds up operations
+
+# Use .NET for faster operations where possible
+Add-Type -AssemblyName System.Net.Http
 
 # Function to log actions
 function Log-Action {
