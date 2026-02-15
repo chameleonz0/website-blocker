@@ -229,19 +229,33 @@ function Refresh-AllBlocks {
 }
 
 function Get-BlockedList {
-    # CHANGE: Added @() around the command to force it to be an array
-    $FromFirewall = @(Get-NetFirewallRule -DisplayName "BLOCK_RULE_*" -ErrorAction SilentlyContinue | ForEach-Object { $_.DisplayName.Replace("BLOCK_RULE_", "") } | Select-Object -Unique)
-   
+    # Ensure arrays are initialized properly
+    $FromFirewall = @()
     $FromHosts = @()
-    $Lines = Get-Content $HostsPath -ErrorAction SilentlyContinue
-    foreach ($Line in $Lines) {
-        if ($Line -match "# BLOCKING: (.*) \(Added:") {
-            $FromHosts += $Matches[1]
+    
+    # Get firewall rules - with null checking
+    $rules = Get-NetFirewallRule -DisplayName "BLOCK_RULE_*" -ErrorAction SilentlyContinue
+    if ($rules) {
+        $FromFirewall = @($rules | ForEach-Object { 
+            $_.DisplayName -replace "BLOCK_RULE_", "" 
+        } | Where-Object { $_ } | Select-Object -Unique)
+    }
+    
+    # Parse hosts file
+    if (Test-Path $HostsPath) {
+        $Lines = Get-Content $HostsPath -ErrorAction SilentlyContinue
+        if ($Lines) {
+            foreach ($Line in $Lines) {
+                if ($Line -match "# BLOCKING: (.*) \(Added:") {
+                    $FromHosts += $Matches[1]
+                }
+            }
         }
     }
     
-    # Now that both are definitely arrays, they will combine correctly
-    return ($FromFirewall + $FromHosts) | Select-Object -Unique | Sort-Object
+    # Combine and clean
+    $combined = @($FromFirewall) + @($FromHosts)
+    return $combined | Where-Object { $_ } | Select-Object -Unique | Sort-Object
 }
 
 function Show-Help {
