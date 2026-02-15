@@ -21,7 +21,9 @@ PowerShell script to block websites on Windows using the hosts file and Windows 
 
 - Backs up hosts file to `C:\\Windows\\System32\\drivers\\etc\\hosts.bak`
 
+## Known Issues
 
+Blocking youtube.com also cause Gemini, youtube music, youtubekids, google ai studio to not work
 
 ## Requirements
 
